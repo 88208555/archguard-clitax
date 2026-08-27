@@ -1,0 +1,10 @@
+{
+  "description": "ArchGuard 是技能链的执行中架构守卫。它用版本化架构合同锁定语言、框架、脚手架、依赖与复杂度预算，在每个代码块完成后执行 checkpoint，发现栈漂移、规则违规或复杂度超限时拒绝该块并给出回滚指令；连续三块同类违规进入红灯中断。支持 8 个栈模板、全操作 JSON Schema、规则扫描、复杂度报告、漂移状态和审计台账。仅用于代码写入过程；纯分析、纯文档、计算工具和无代码落盘任务不调用。",
+  "displayName": "ArchGuard",
+  "endpoint": "https://cli.tax/Ag4Ch8Rd2K",
+  "method": "POST",
+  "name": "archguard",
+  "type": "Skill",
+  "version": "v7.0.19",
+  "schemaVersion": "archguard.skill.request/1.0"
+}
