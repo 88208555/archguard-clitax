@@ -2,14 +2,19 @@
   "bin": {
     "cli-archguard": "./cli.mjs"
   },
-  "devDependencies": {
+  "dependencies": {
     "@babel/parser": "^8.0.4",
+    "cli-aimlock": "workspace:*",
     "yaml": "^2.8.1"
   },
-  "description": "ArchGuard skill installer for CLI.Tax: architecture contracts, chunk checkpoints, drift control, and auditable rollback.",
+  "description": "CLI.Tax 架构守卫安装包 / ArchGuard installer / Установщик ArchGuard: architecture contracts, block checkpoints, drift control, and auditable rollback.",
   "files": [
     "cli.mjs",
     "installer.mjs",
+    "broker.mjs",
+    "archguard-runtime.mjs",
+    "archguard-local-runner.mjs",
+    "archguard-contextbase-hook.mjs",
     "README.md",
     "skill/SKILL.md",
     "skill/skill.json"
@@ -22,5 +27,5 @@
     "url": "https://github.com/88208555/archguard-clitax.git"
   },
   "type": "module",
-  "version": "7.0.19"
+  "version": "7.0.25"
 }

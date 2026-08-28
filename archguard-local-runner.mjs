@@ -1,5 +1,7 @@
 import { createRequire } from "node:module";
 import * as import_archguard_runtime from "./archguard-runtime.mjs";
+import { verifyMutationPassFile } from "cli-aimlock/local-runner";
+import { recordContextBaseInvalidation } from "./archguard-contextbase-hook.mjs";
 const require = createRequire(import.meta.url);
 const import_node_crypto = require("node:crypto");
 const import_node_fs = require("node:fs");
@@ -11,6 +13,8 @@ const __name = (target, value) =>
   Object.defineProperty(target, "name", { value, configurable: true });
 const SNAPSHOT_VERSION = "archguard.block-snapshot/1.0";
 const LEDGER_VERSION = "archguard.checkpoint-ledger/1.0";
+const MANAGED_DIRECTORY = ".archguard";
+const MANAGED_OWNER = "cli-archguard";
 const MISSING_SHA256 = (0, import_node_crypto.createHash)("sha256")
   .update("archguard.missing-file/1.0")
   .digest("hex");
@@ -30,8 +34,10 @@ function safeRelativePath(value, context) {
   if (
     typeof value !== "string" ||
     value !== value.normalize("NFC") ||
-    value.startsWith("/") ||
+    (0, import_node_path.isAbsolute)(value) ||
+    /^[A-Za-z]:/.test(value) ||
     value.includes("\\") ||
+    /[\u0000-\u001f\u007f]/.test(value) ||
     value.split("/").some((part) => !part || part === "." || part === "..")
   ) {
     throw new Error(`${context} is unsafe`);
@@ -39,6 +45,15 @@ function safeRelativePath(value, context) {
   return value;
 }
 __name(safeRelativePath, "safeRelativePath");
+function managedRelativePath(value, context) {
+  const path = safeRelativePath(value, context);
+  const segments = path.split("/");
+  if (segments[0] !== MANAGED_DIRECTORY || segments.length < 2) {
+    throw new Error(`${context} must be inside ${MANAGED_DIRECTORY}`);
+  }
+  return { path, segments };
+}
+__name(managedRelativePath, "managedRelativePath");
 function assertInside(root, target, context) {
   const path = (0, import_node_path.relative)(root, target);
   if (
@@ -55,6 +70,10 @@ function missing(error) {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 __name(missing, "missing");
+function alreadyExists(error) {
+  return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+__name(alreadyExists, "alreadyExists");
 async function repositoryRoot(value) {
   if (typeof value !== "string" || value !== value.trim() || !value)
     throw new Error("repositoryRoot is required");
@@ -65,6 +84,57 @@ async function repositoryRoot(value) {
   return (0, import_promises.realpath)(explicit);
 }
 __name(repositoryRoot, "repositoryRoot");
+async function managedTarget(root, value, context, createParents) {
+  const managed = managedRelativePath(value, context);
+  let current = root;
+  for (const segment of managed.segments.slice(0, -1)) {
+    current = (0, import_node_path.resolve)(current, segment);
+    if (createParents) {
+      try {
+        await (0, import_promises.mkdir)(current, { mode: 448 });
+      } catch (error) {
+        if (!alreadyExists(error)) throw error;
+      }
+    }
+    const status = await (0, import_promises.lstat)(current);
+    if (status.isSymbolicLink() || !status.isDirectory()) {
+      throw new Error(`${context} parent cannot be a symlink or junction`);
+    }
+    const real = await (0, import_promises.realpath)(current);
+    assertInside(root, real, `${context} parent`);
+    if (real !== current) {
+      throw new Error(`${context} parent must resolve inside the real repository`);
+    }
+  }
+  const target = (0, import_node_path.resolve)(root, ...managed.segments);
+  const managedRoot = (0, import_node_path.resolve)(root, MANAGED_DIRECTORY);
+  assertInside(managedRoot, target, context);
+  return { target, relativePath: managed.path };
+}
+__name(managedTarget, "managedTarget");
+async function managedFile(root, value, context, allowMissing, createParents) {
+  const target = await managedTarget(root, value, context, createParents);
+  let status;
+  try {
+    status = await (0, import_promises.lstat)(target.target);
+  } catch (error) {
+    if (allowMissing && missing(error)) return { ...target, exists: false };
+    throw error;
+  }
+  if (status.isSymbolicLink() || !status.isFile()) {
+    throw new Error(`${context} must be a real managed file`);
+  }
+  const real = await (0, import_promises.realpath)(target.target);
+  if (real !== target.target) {
+    throw new Error(`${context} cannot be a symlink or junction`);
+  }
+  return {
+    ...target,
+    exists: true,
+    identity: { device: status.dev, inode: status.ino },
+  };
+}
+__name(managedFile, "managedFile");
 async function resolveProjectFile(root, projectPath, allowMissing) {
   const path = safeRelativePath(projectPath, "project path");
   const target = (0, import_node_path.resolve)(root, ...path.split("/"));
@@ -117,41 +187,66 @@ async function contractFromFile(root, contractPath) {
   return contract;
 }
 __name(contractFromFile, "contractFromFile");
-async function jsonFile(path, context) {
-  const source = await noFollowRead((0, import_node_path.resolve)(path));
+async function managedJsonFile(root, path, context) {
+  const file = await managedFile(root, path, context, false, false);
+  const source = await noFollowRead(file.target);
   let parsed;
   try {
     parsed = JSON.parse(source.toString("utf8"));
   } catch {
     throw new Error(`${context} is not valid JSON`);
   }
-  return parsed;
+  return { parsed, file };
 }
-__name(jsonFile, "jsonFile");
-async function writeAtomic(path, body, mode = 384) {
-  const target = (0, import_node_path.resolve)(path);
-  await (0, import_promises.mkdir)((0, import_node_path.dirname)(target), {
-    recursive: true,
-    mode: 448,
+__name(managedJsonFile, "managedJsonFile");
+async function createManagedFile(root, path, body) {
+  const file = await managedFile(root, path, "managed file", true, true);
+  if (file.exists) throw new Error("managed file already exists");
+  await (0, import_promises.writeFile)(file.target, body, {
+    flag: "wx",
+    mode: 384,
   });
-  const temporary = `${target}.${(0, import_node_crypto.randomUUID)()}.tmp`;
-  await (0, import_promises.writeFile)(temporary, body, { flag: "wx", mode });
-  await (0, import_promises.rename)(temporary, target);
+  return managedFile(root, path, "managed file", false, false);
 }
-__name(writeAtomic, "writeAtomic");
-async function initializeCheckpointLedger(path) {
-  const target = (0, import_node_path.resolve)(path);
-  await (0, import_promises.mkdir)((0, import_node_path.dirname)(target), {
-    recursive: true,
-    mode: 448,
-  });
-  await (0, import_promises.writeFile)(
-    target,
-    `${JSON.stringify({ schemaVersion: LEDGER_VERSION, entries: [] })}
-`,
-    { flag: "wx", mode: 384 },
+__name(createManagedFile, "createManagedFile");
+function sameIdentity(left, right) {
+  return left.device === right.device && left.inode === right.inode;
+}
+__name(sameIdentity, "sameIdentity");
+async function replaceManagedFile(root, path, body, expectedIdentity) {
+  const current = await managedFile(root, path, "managed file", false, false);
+  if (!sameIdentity(current.identity, expectedIdentity)) {
+    throw new Error("managed file changed before update");
+  }
+  const temporaryPath = `${current.relativePath}.${(0, import_node_crypto.randomUUID)()}.tmp`;
+  const temporary = await createManagedFile(root, temporaryPath, body);
+  try {
+    const verified = await managedFile(root, path, "managed file", false, false);
+    if (!sameIdentity(verified.identity, expectedIdentity)) {
+      throw new Error("managed file changed before replacement");
+    }
+    await (0, import_promises.rename)(temporary.target, verified.target);
+  } catch (error) {
+    await (0, import_promises.unlink)(temporary.target);
+    throw error;
+  }
+}
+__name(replaceManagedFile, "replaceManagedFile");
+async function initializeCheckpointLedger(input) {
+  const source = object(input, "ledger input");
+  const root = await repositoryRoot(source.repositoryRoot);
+  const ledger = {
+    schemaVersion: LEDGER_VERSION,
+    managedBy: MANAGED_OWNER,
+    repositoryRoot: root,
+    entries: [],
+  };
+  const file = await createManagedFile(
+    root,
+    source.ledgerPath,
+    `${JSON.stringify(ledger)}\n`,
   );
-  return { schemaVersion: LEDGER_VERSION, path: target };
+  return { schemaVersion: LEDGER_VERSION, path: file.target };
 }
 __name(initializeCheckpointLedger, "initializeCheckpointLedger");
 async function createBlockSnapshot(input) {
@@ -167,6 +262,7 @@ async function createBlockSnapshot(input) {
     : null;
   const snapshot = {
     schemaVersion: SNAPSHOT_VERSION,
+    managedBy: MANAGED_OWNER,
     repositoryRoot: root,
     targetPath: path,
     existed: projectFile.exists,
@@ -174,19 +270,13 @@ async function createBlockSnapshot(input) {
     fileMode,
     contentBase64: content ? content.toString("base64") : null,
   };
-  const snapshotPath = (0, import_node_path.resolve)(source.snapshotPath);
-  await (0, import_promises.mkdir)(
-    (0, import_node_path.dirname)(snapshotPath),
-    { recursive: true, mode: 448 },
-  );
-  await (0, import_promises.writeFile)(
-    snapshotPath,
-    `${JSON.stringify(snapshot)}
-`,
-    { flag: "wx", mode: 384 },
+  const snapshotFile = await createManagedFile(
+    root,
+    source.snapshotPath,
+    `${JSON.stringify(snapshot)}\n`,
   );
   return {
-    snapshotPath,
+    snapshotPath: snapshotFile.target,
     beforeSha256: snapshot.beforeSha256,
     existed: snapshot.existed,
   };
@@ -273,38 +363,64 @@ async function restoreSnapshot(root, snapshot) {
   } else if (target.exists) await (0, import_promises.unlink)(target.target);
 }
 __name(restoreSnapshot, "restoreSnapshot");
-async function checkpointLedger(path) {
+async function checkpointLedger(root, path) {
+  const authority = await managedJsonFile(root, path, "checkpoint ledger");
   const ledger = object(
-    await jsonFile(path, "checkpoint ledger"),
+    authority.parsed,
     "checkpoint ledger",
   );
   if (
     ledger.schemaVersion !== LEDGER_VERSION ||
+    ledger.managedBy !== MANAGED_OWNER ||
+    ledger.repositoryRoot !== root ||
     !Array.isArray(ledger.entries)
   ) {
     throw new Error("checkpoint ledger authority is invalid");
   }
-  return ledger;
+  return { ledger, file: authority.file };
 }
 __name(checkpointLedger, "checkpointLedger");
-async function checkpointFileAndRollback(input) {
-  const source = object(input, "checkpoint input");
-  const root = await repositoryRoot(source.repositoryRoot);
-  const snapshot = object(
-    await jsonFile(source.snapshotPath, "block snapshot"),
-    "block snapshot",
-  );
+async function checkpointSnapshot(root, snapshotPath, targetPath) {
+  const authority = await managedJsonFile(root, snapshotPath, "block snapshot");
+  const snapshot = object(authority.parsed, "block snapshot");
   if (
     snapshot.schemaVersion !== SNAPSHOT_VERSION ||
+    snapshot.managedBy !== MANAGED_OWNER ||
     snapshot.repositoryRoot !== root ||
-    snapshot.targetPath !== source.targetPath
+    snapshot.targetPath !== targetPath
   )
     throw new Error("block snapshot authority is invalid");
-  const projectFile = await resolveProjectFile(root, source.targetPath, false);
-  const content = (await noFollowRead(projectFile.target)).toString("utf8");
+  return snapshot;
+}
+__name(checkpointSnapshot, "checkpointSnapshot");
+async function checkpointFileAndRollbackUnchecked(input) {
+  const source = object(input, "checkpoint input");
+  const root = await repositoryRoot(source.repositoryRoot);
+  const targetPath = safeRelativePath(source.targetPath, "targetPath");
+  const snapshot = await checkpointSnapshot(root, source.snapshotPath, targetPath);
+  const projectFile = await resolveProjectFile(root, targetPath, true);
+  const content = projectFile.exists
+    ? (await noFollowRead(projectFile.target)).toString("utf8")
+    : "";
   const contract = await contractFromFile(root, source.contractPath);
-  const ledger = await checkpointLedger(source.ledgerPath);
-  const result = await (0, import_archguard_runtime.run)({
+  const ledgerAuthority = await checkpointLedger(root, source.ledgerPath);
+  const ledger = ledgerAuthority.ledger;
+  const missingTargetFindings = snapshot.existed && !projectFile.exists
+    ? [{
+        severity: "P0",
+        ruleId: "ARCH-TARGET-DELETED",
+        entityRef: targetPath,
+        message: "The checkpoint target was deleted after its snapshot",
+        category: "structure",
+        blocking: true,
+        evidence: { beforeSha256: snapshot.beforeSha256 },
+      }]
+    : [];
+  const trustedFindings = [
+    ...missingTargetFindings,
+    ...astFindings(content, targetPath, contract),
+  ];
+  const result = await (0, import_archguard_runtime.runTrustedLocalCheckpoint)({
     schemaVersion: "archguard.skill.request/1.0",
     requestId: `checkpoint-${(0, import_node_crypto.randomUUID)()}`,
     operation: "checkpoint",
@@ -312,28 +428,58 @@ async function checkpointFileAndRollback(input) {
       contract,
       block: {
         blockId: source.blockId,
-        path: source.targetPath,
+        path: targetPath,
         content,
         beforeSha256: snapshot.beforeSha256,
-        astFindings: astFindings(content, source.targetPath, contract),
       },
       history: ledger.entries,
     },
-  });
+  }, trustedFindings);
   if (result.output.checkpoint.rollbackRequired)
     await restoreSnapshot(root, snapshot);
   const updated = {
     schemaVersion: LEDGER_VERSION,
+    managedBy: MANAGED_OWNER,
+    repositoryRoot: root,
     entries: [...ledger.entries, result.output.ledgerEntry],
   };
-  await writeAtomic(
+  await replaceManagedFile(
+    root,
     source.ledgerPath,
-    `${JSON.stringify(updated)}
-`,
+    `${JSON.stringify(updated)}\n`,
+    ledgerAuthority.file.identity,
   );
   return {
     ...result,
     rollbackCompleted: result.output.checkpoint.rollbackRequired,
+  };
+}
+__name(checkpointFileAndRollbackUnchecked, "checkpointFileAndRollbackUnchecked");
+async function checkpointFileAndRollback(input) {
+  const source = object(input, "checkpoint input");
+  let gate;
+  try {
+    gate = await verifyMutationPassFile({ repositoryRoot: source.repositoryRoot,
+      chainId: source.chainId, targetPath: source.targetPath,
+      gatePassPath: source.gatePassPath });
+  } catch (error) {
+    const root = await repositoryRoot(source.repositoryRoot);
+    const targetPath = safeRelativePath(source.targetPath, "targetPath");
+    await restoreSnapshot(root, await checkpointSnapshot(root, source.snapshotPath, targetPath));
+    throw error;
+  }
+  const result = await checkpointFileAndRollbackUnchecked(source);
+  const contextBaseInvalidation = await recordContextBaseInvalidation(source.repositoryRoot,
+    source.targetPath, result.output.checkpoint.status);
+  return {
+    ...result,
+    contextBaseInvalidation,
+    gateEvidence: {
+      schemaVersion: gate.schemaVersion,
+      passId: gate.pass.passId,
+      chainId: gate.pass.chainId,
+      targetPath: gate.targetPath,
+    },
   };
 }
 __name(checkpointFileAndRollback, "checkpointFileAndRollback");
