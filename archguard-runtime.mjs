@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 const REQUEST_VERSION = 'archguard.skill.request/1.0'
 const RESPONSE_VERSION = 'archguard.skill.response/1.0'
-const COMPILER_VERSION = 'v7.0.33'
+const COMPILER_VERSION = 'v7.0.34'
 const CONTRACT_VERSION = 'archguard.contract/1.0'
 const LEDGER_VERSION = 'archguard.checkpoint-ledger/1.0'
 const SHA256 = /^[0-9a-f]{64}$/
