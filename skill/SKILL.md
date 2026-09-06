@@ -5,7 +5,7 @@ description: '在代码写入期间锁定项目架构合同，并逐块检查技
 
 # 架构守卫 / ArchGuard / Архитектурный страж
 
-Package version: v7.0.34
+Package version: v7.0.35
 
 Endpoint: https://cli.tax/Ag4Ch8Rd2K
 Request schema: `archguard.skill.request/1.0`
