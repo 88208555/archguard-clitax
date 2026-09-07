@@ -5,6 +5,6 @@
   "method": "POST",
   "name": "archguard",
   "type": "Skill",
-  "version": "v7.0.35",
+  "version": "v7.0.36",
   "schemaVersion": "archguard.skill.request/1.0"
 }
