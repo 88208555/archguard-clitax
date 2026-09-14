@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 const REQUEST_VERSION = 'archguard.skill.request/1.0'
 const RESPONSE_VERSION = 'archguard.skill.response/1.0'
-const COMPILER_VERSION = 'v7.0.39'
+const COMPILER_VERSION = 'v7.0.40'
 const CONTRACT_VERSION = 'archguard.contract/1.0'
 const LEDGER_VERSION = 'archguard.checkpoint-ledger/1.0'
 const SHA256 = /^[0-9a-f]{64}$/
@@ -23,6 +23,14 @@ const TEMPLATE_DEFINITIONS = Object.freeze({
   'tauri-react': { frontend: { language: 'typescript', framework: 'react-18', scaffold: 'tauri-2', uiLibrary: 'antd-5', styling: 'css-modules', stateManagement: 'zustand', forbiddenDeps: ['electron', 'jquery'] }, backend: { language: 'rust-2024', framework: 'tauri-2', orm: 'none', forbiddenDeps: [], patterns: { required: ['command-boundary'], forbidden: ['unsafe-without-audit'] } } },
 })
 const DEFAULT_BUDGETS = Object.freeze({ maxNestingDepth: 4, maxFileLines: 300, maxFunctionLines: 50, animations: 3, transitions: -1, bundleBudgetKB: 500 })
+const DEPENDENCY_LOCKFILES = new Set(['pnpm-lock.yaml', 'package-lock.json', 'npm-shrinkwrap.json',
+  'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'go.sum', 'composer.lock', 'Gemfile.lock',
+  'Pipfile.lock', 'poetry.lock', 'uv.lock', 'pdm.lock', 'pubspec.lock', 'packages.lock.json', 'Package.resolved'])
+const THIRD_PARTY_DIRECTORIES = new Set(['node_modules', 'vendor', 'third_party', 'third-party', '.venv', 'site-packages'])
+const GENERATED_DIRECTORIES = new Set(['dist', '.umi', '.umi-production', '.runtime', '.next', 'coverage'])
+const THIRD_PARTY_ROOTS = ['services/hermes-agent']
+const GENERATED_ROOTS = ['apps/server/api']
+const INSPECTION_SCOPES = ['first-party', 'dependency-lockfile', 'third-party', 'generated']
 const BUILTIN_RULES = Object.freeze([
   { id: 'no-inline-style', category: 'standard', pattern: /\bstyle\s*=\s*(?:\{\{|["'])/g, message: 'Use the locked styling system instead of inline style.' },
   { id: 'no-hardcoded-color', category: 'standard', pattern: /#[0-9a-f]{3,8}\b|\brgb(?:a)?\s*\(|\bhsl(?:a)?\s*\(/gi, message: 'Use project theme tokens instead of hardcoded colors.' },
@@ -43,7 +51,7 @@ const CONTRACT_SCHEMA = strict({ schemaVersion: { const: CONTRACT_VERSION }, con
 const overrideSchema = strict({ stack: stackSchema, rules: rulesSchema, budgets: budgetSchema, audit: auditSchema })
 const fileSchema = strict({ path: stringSchema, content: stringSchema }, ['path', 'content'])
 const findingSchema = strict({ severity: { enum: ['P0', 'P1', 'P2'] }, ruleId: stringSchema, entityRef: stringSchema, message: stringSchema, category: stringSchema, blocking: booleanSchema, evidence: { type: 'object', additionalProperties: true } }, ['severity', 'ruleId', 'entityRef', 'message', 'category', 'blocking', 'evidence'])
-const metricSchema = strict({ path: stringSchema, fileLines: integerSchema, maxNestingDepth: integerSchema, maxFunctionLines: integerSchema, animations: integerSchema, transitions: integerSchema }, ['path', 'fileLines', 'maxNestingDepth', 'maxFunctionLines', 'animations', 'transitions'])
+const metricSchema = strict({ path: stringSchema, inspectionScope: { enum: INSPECTION_SCOPES }, complexityChecked: booleanSchema, fileLines: integerSchema, maxNestingDepth: integerSchema, maxFunctionLines: integerSchema, animations: integerSchema, transitions: integerSchema }, ['path', 'inspectionScope', 'complexityChecked', 'fileLines', 'maxNestingDepth', 'maxFunctionLines', 'animations', 'transitions'])
 const ledgerEntrySchema = strict({ schemaVersion: { const: LEDGER_VERSION }, checkpointId: stringSchema, blockId: stringSchema, path: stringSchema, contractRevision: integerSchema, beforeSha256: { type: 'string', pattern: SHA256.source }, afterSha256: { type: 'string', pattern: SHA256.source }, status: { enum: ['passed', 'blocked'] }, ruleIds: stringArraySchema, blockingRuleIds: stringArraySchema, rollbackRequired: booleanSchema }, ['schemaVersion', 'checkpointId', 'blockId', 'path', 'contractRevision', 'beforeSha256', 'afterSha256', 'status', 'ruleIds', 'blockingRuleIds', 'rollbackRequired'])
 const ledgerSchema = { type: 'array', items: ledgerEntrySchema }
 const digestSchema = { type: 'string', pattern: SHA256.source }
@@ -93,6 +101,19 @@ function record(value, context) {
 const response = (requestId, status, output, findings = []) => ({ ok: true, schemaVersion: RESPONSE_VERSION, requestId, status, output, findings })
 const finding = (severity, ruleId, entityRef, message, category, blocking = true, evidence = {}) => ({ severity, ruleId, entityRef, message, category, blocking, evidence })
 const pathSafe = (path) => typeof path === 'string' && path === path.normalize('NFC') && !path.startsWith('/') && !path.includes('\\') && path.split('/').every((part) => part && part !== '.' && part !== '..')
+
+function sourceInspectionScope(path) {
+  if (!pathSafe(path)) return 'first-party'
+  const parts = path.split('/')
+  const directories = parts.slice(0, -1)
+  if (directories.some((part) => THIRD_PARTY_DIRECTORIES.has(part))
+    || THIRD_PARTY_ROOTS.some((root) => path.startsWith(`${root}/`))) return 'third-party'
+  if (DEPENDENCY_LOCKFILES.has(parts.at(-1))) return 'dependency-lockfile'
+  if (directories.some((part) => GENERATED_DIRECTORIES.has(part))
+    || GENERATED_ROOTS.some((root) => path.startsWith(`${root}/`))
+    || /\.min\.(?:[cm]?js|css)$/.test(path)) return 'generated'
+  return 'first-party'
+}
 
 function normalizeCustomRule(value, index) {
   const rule = record(value, `rules.custom[${index}]`)
@@ -185,6 +206,7 @@ function ruleFindings(contract, file) {
   return findings
 }
 function complexity(file) {
+  const inspectionScope = sourceInspectionScope(file.path)
   const lines = file.content.split(/\r?\n/)
   let depth = 0; let maximumDepth = 0; let functionStart = null; let maximumFunctionLines = 0
   for (const [index, line] of lines.entries()) {
@@ -195,9 +217,10 @@ function complexity(file) {
     if (functionStart && depth <= functionStart.depth) { maximumFunctionLines = Math.max(maximumFunctionLines, index - functionStart.line + 1); functionStart = null }
   }
   if (functionStart) maximumFunctionLines = Math.max(maximumFunctionLines, lines.length - functionStart.line)
-  return { path: file.path, fileLines: lines.length, maxNestingDepth: maximumDepth, maxFunctionLines: maximumFunctionLines, animations: (file.content.match(/@keyframes\b|\banimation(?:-name)?\s*:/g) ?? []).length, transitions: (file.content.match(/\btransition(?:-property)?\s*:/g) ?? []).length }
+  return { path: file.path, inspectionScope, complexityChecked: inspectionScope === 'first-party', fileLines: lines.length, maxNestingDepth: maximumDepth, maxFunctionLines: maximumFunctionLines, animations: (file.content.match(/@keyframes\b|\banimation(?:-name)?\s*:/g) ?? []).length, transitions: (file.content.match(/\btransition(?:-property)?\s*:/g) ?? []).length }
 }
 function complexityFindings(contract, metric) {
+  if (!metric.complexityChecked) return []
   const checks = [['maxFileLines', 'fileLines'], ['maxNestingDepth', 'maxNestingDepth'], ['maxFunctionLines', 'maxFunctionLines'], ['animations', 'animations'], ['transitions', 'transitions']]
   return checks.flatMap(([budgetKey, metricKey]) => contract.budgets[budgetKey] >= 0 && metric[metricKey] > contract.budgets[budgetKey] ? [finding('P1', `BUDGET-${budgetKey.toUpperCase()}`, metric.path, `${metricKey} ${metric[metricKey]} exceeds budget ${contract.budgets[budgetKey]}.`, 'complexity', true, { actual: metric[metricKey], budget: contract.budgets[budgetKey] })] : [])
 }
@@ -205,7 +228,11 @@ function scanFiles(contract, files) {
   if (!Array.isArray(files) || !files.length) throw new Error('files must be non-empty')
   const normalized = files.map((value) => record(value, 'file'))
   const metrics = normalized.map(complexity)
-  const findings = normalized.flatMap((file) => [...languageFindings(contract, file), ...ruleFindings(contract, file)]).concat(metrics.flatMap((metric) => complexityFindings(contract, metric)))
+  const findings = normalized.flatMap((file) => {
+    if (!pathSafe(file.path)) return languageFindings(contract, file)
+    if (sourceInspectionScope(file.path) !== 'first-party') return []
+    return [...languageFindings(contract, file), ...ruleFindings(contract, file)]
+  }).concat(metrics.flatMap((metric) => complexityFindings(contract, metric)))
   return { findings, metrics }
 }
 function driftState(ledger) {
@@ -225,7 +252,8 @@ function checkpoint(contract, blockValue, history, trustedAstFindings) {
   if (!Array.isArray(history)) throw new Error('checkpoint history is required')
   if (!pathSafe(block.path) || typeof block.content !== 'string' || !SHA256.test(block.beforeSha256)) throw new Error('checkpoint block is invalid')
   const scan = scanFiles(contract, [{ path: block.path, content: block.content }])
-  const astRules = contract.rules.custom.filter((rule) => rule.engine === 'ast')
+  const astRules = sourceInspectionScope(block.path) === 'first-party'
+    ? contract.rules.custom.filter((rule) => rule.engine === 'ast') : []
   if (astRules.length && !Array.isArray(trustedAstFindings)) scan.findings.push(finding('P1', 'ARCH-AST-LOCAL-RUNNER-REQUIRED', block.path, 'AST custom rules require the bundled trusted local checkpoint runner.', 'custom', true, { ruleIds: astRules.map((rule) => rule.id) }))
   if (Array.isArray(trustedAstFindings)) for (const item of trustedAstFindings) scan.findings.push(record(item, 'trusted AST finding'))
   const blocking = scan.findings.filter((item) => item.blocking)
@@ -283,4 +311,4 @@ async function runTrustedLocalCheckpoint(request, trustedAstFindings) {
   return execute(request, trustedAstFindings.map((item) => record(item, 'trusted AST finding')))
 }
 
-export { CONTRACT_VERSION, LEDGER_VERSION, OPERATION_SCHEMAS, TEMPLATE_DEFINITIONS, run, runTrustedLocalCheckpoint }
+export { CONTRACT_VERSION, LEDGER_VERSION, OPERATION_SCHEMAS, TEMPLATE_DEFINITIONS, sourceInspectionScope, run, runTrustedLocalCheckpoint }

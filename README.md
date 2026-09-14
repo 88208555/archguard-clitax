@@ -14,6 +14,8 @@ npx cli-archguard@latest install
 
 The npm package includes the runtime and trusted local runner. Remote JSON cannot submit AST findings; AST contracts must use these local commands:
 
+源码行数、函数长度、嵌套、风格、语言和 AST 规则只检查第一方文件。依赖管理器锁文件、已安装或 vendor 导入的第三方源码及已识别生成产物不适用这些规则，检查结果以 `inspectionScope` 和 `complexityChecked: false` 记录。不得为源码行数限制拆分或回滚锁文件；第一方依赖声明、版本、完整性、安全与写入授权检查继续执行。
+
 ```bash
 cli-archguard ledger-init . .archguard/ledger.json
 cli-archguard snapshot . src/example.ts .archguard/example.snapshot.json

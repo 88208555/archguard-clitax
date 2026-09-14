@@ -283,6 +283,7 @@ async function createBlockSnapshot(input) {
 }
 __name(createBlockSnapshot, "createBlockSnapshot");
 function astFindings(content, path, contract) {
+  if (import_archguard_runtime.sourceInspectionScope(path) !== "first-party") return [];
   const rules =
     contract.rules?.custom?.filter((rule) => rule.engine === "ast") ?? [];
   if (!rules.length) return [];
